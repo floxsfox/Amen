@@ -1,0 +1,156 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # ---------- 1. Susun project dari index.html ----------
+      - name: Susun project
+        run: |
+          mkdir -p app/public/src
+          cp index.html app/index.html
+
+          # Musik latar: pakai bgm.mp3 di repo kalau ada, kalau tidak download dari link lama
+          if [ -f bgm.mp3 ]; then
+            cp bgm.mp3 app/public/bgm.mp3
+          else
+            curl -fL --retry 3 -o app/public/bgm.mp3 "https://user.uploads.dev/file/96ac634348fd57e36f48bf33fa197d36.mp3" \
+              || { rm -f app/public/bgm.mp3; echo "::warning::bgm.mp3 gagal diunduh. Upload bgm.mp3 ke repo supaya musik menu ada."; }
+          fi
+
+          # Video intro (opsional): taruh intro.mp4 di root repo
+          if [ -f intro.mp4 ]; then cp intro.mp4 app/public/src/intro.mp4; fi
+
+          cat > app/package.json <<'EOF'
+          {
+            "name": "beatdrop",
+            "version": "1.0.0",
+            "private": true,
+            "type": "module",
+            "scripts": { "build": "vite build" },
+            "dependencies": {
+              "@capacitor/android": "^6.2.1",
+              "@capacitor/core": "^6.2.1",
+              "@fontsource/chakra-petch": "^5.1.0"
+            },
+            "devDependencies": {
+              "@capacitor/cli": "^6.2.1",
+              "vite": "^5.4.0"
+            }
+          }
+          EOF
+
+          cat > app/vite.config.js <<'EOF'
+          export default {
+            base: './',
+            build: {
+              outDir: 'dist',
+              target: 'esnext',
+              cssTarget: 'esnext',
+              cssMinify: false,
+              minify: false,
+              assetsInlineLimit: 0
+            }
+          }
+          EOF
+
+          cat > app/main.js <<'EOF'
+          import '@fontsource/chakra-petch/500.css';
+          import '@fontsource/chakra-petch/700.css';
+          import '@fontsource/chakra-petch/700-italic.css';
+          EOF
+
+          cat > app/capacitor.config.json <<'EOF'
+          {
+            "appId": "com.beatdrop.game",
+            "appName": "BeatDrop",
+            "webDir": "dist",
+            "backgroundColor": "#0a0818",
+            "server": { "androidScheme": "https" }
+          }
+          EOF
+
+      # ---------- 2. Build web (semua aset jadi lokal) ----------
+      - name: Build web
+        working-directory: app
+        run: |
+          npm install
+          npm run build
+          ls -la dist
+
+      # ---------- 3. Buat project Android ----------
+      - name: Tambah Android
+        working-directory: app
+        run: |
+          npx cap add android
+
+          # Paksa landscape
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          sed -i 's/\(android:name="[^"]*MainActivity"\)/\1 android:screenOrientation="sensorLandscape"/' "$MANIFEST"
+          grep -n "screenOrientation" "$MANIFEST"
+
+          # Fullscreen penuh (sembunyikan status bar & tombol navigasi) + layar tetap menyala
+          cat > android/app/src/main/java/com/beatdrop/game/MainActivity.java <<'EOF'
+          package com.beatdrop.game;
+
+          import android.os.Bundle;
+          import android.view.WindowManager;
+          import androidx.core.view.WindowCompat;
+          import androidx.core.view.WindowInsetsCompat;
+          import androidx.core.view.WindowInsetsControllerCompat;
+          import com.getcapacitor.BridgeActivity;
+
+          public class MainActivity extends BridgeActivity {
+            @Override
+            public void onCreate(Bundle savedInstanceState) {
+              super.onCreate(savedInstanceState);
+              getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+              hideBars();
+            }
+
+            @Override
+            public void onWindowFocusChanged(boolean hasFocus) {
+              super.onWindowFocusChanged(hasFocus);
+              if (hasFocus) hideBars();
+            }
+
+            private void hideBars() {
+              WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+              WindowInsetsControllerCompat c =
+                  WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+              c.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+              c.hide(WindowInsetsCompat.Type.systemBars());
+            }
+          }
+          EOF
+
+          npx cap sync android
+
+      # ---------- 4. Build APK ----------
+      - name: Build APK
+        working-directory: app/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Simpan APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BeatDrop-APK
+          path: app/android/app/build/outputs/apk/debug/app-debug.apk
